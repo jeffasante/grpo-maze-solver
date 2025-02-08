@@ -123,6 +123,15 @@ class GRPORewardNetwork(nn.Module):
         return self.network(x).squeeze(-1)
 
 
+def calculate_kl_divergence(policy, reference_policy, states):
+    with torch.no_grad():
+        ref_logits = reference_policy(states)
+    new_logits = policy(states)
+    kl_div = torch.distributions.kl.kl_divergence(Categorical(logits=new_logits), 
+                                                   Categorical(logits=ref_logits))
+    return kl_div
+
+
 # Calculate KL divergence between two policies
 def train_maze_grpo(maze_env, num_episodes=5000, group_size=64):
     """
