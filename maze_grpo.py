@@ -7,6 +7,7 @@ Github: github.com/jeffasante
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # For loss functions
 import torch.optim as optim
 from torch.distributions import Categorical
 import numpy as np
@@ -14,15 +15,12 @@ from torch.utils.tensorboard import SummaryWriter
 import os
 import pygame
 
-
 '''
 ExperienceBuffer: For storing experiences for reward model training
 GroupBuffer: For storing and calculating relative advantages between groups of trajectories
 GRPORewardNetwork: Neural network for predicting rewards in GRPO
 GRPONetwork: Neural network for policy in GRPO
-
 '''
-
 
 # Group Buffer for storing policies
 class GroupBuffer:
@@ -49,15 +47,12 @@ class GroupBuffer:
     def mean_return(self):
         return sum(self.returns) / len(self.returns) if self.returns else 0
 
-
-
-# GRPO Network
+# GRPO Network (Policy)
 class GRPONetwork(nn.Module):
     def __init__(self, obs_dim, act_dim):
         super().__init__()
         # For maze: obs_dim will be 4 (x, y, target_x, target_y)
         # act_dim will be 4 (up, down, left, right)
-        
         self.actor = nn.Sequential(
             nn.Linear(obs_dim, 64),
             nn.ReLU(),
@@ -69,6 +64,29 @@ class GRPONetwork(nn.Module):
     def forward(self, x):
         return self.actor(x)
 
+# Reward network for GRPO
+class GRPORewardNetwork(nn.Module):
+    """Neural network for predicting rewards in GRPO"""
+    def __init__(self, obs_dim, act_dim):
+        super().__init__()
+        self.act_dim = act_dim  # Store action dimension
+        self.network = nn.Sequential(
+            nn.Linear(obs_dim + act_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+        
+    def forward(self, state, action):
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+        # Create one-hot tensor on the same device as input tensors
+        action_onehot = torch.zeros(action.size(0), self.act_dim, device=action.device)
+        action_onehot.scatter_(1, action.unsqueeze(1), 1)
+        # Concatenate and pass through network
+        x = torch.cat([state, action_onehot], dim=1)
+        return self.network(x).squeeze(-1)
 
 # Reward model training buffer
 class ExperienceBuffer:
@@ -98,50 +116,27 @@ class ExperienceBuffer:
     def __len__(self):
         return len(self.states)
 
-# Reward network for GRPO
-class GRPORewardNetwork(nn.Module):
-    """Neural network for predicting rewards in GRPO"""
-    def __init__(self, obs_dim, act_dim):
-        super().__init__()
-        self.act_dim = act_dim  # Store action dimension
-        self.network = nn.Sequential(
-            nn.Linear(obs_dim + act_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1)
-        )
-        
-    def forward(self, state, action):
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-        # Create one-hot tensor on the same device as input tensors
-        action_onehot = torch.zeros(action.size(0), self.act_dim, device=action.device)
-        action_onehot.scatter_(1, action.unsqueeze(1), 1)
-        # Concatenate and pass through network
-        x = torch.cat([state, action_onehot], dim=1)
-        return self.network(x).squeeze(-1)
-
-
 def calculate_kl_divergence(policy, reference_policy, states):
     with torch.no_grad():
         ref_logits = reference_policy(states)
     new_logits = policy(states)
-    kl_div = torch.distributions.kl.kl_divergence(Categorical(logits=new_logits), 
-                                                   Categorical(logits=ref_logits))
+    kl_div = torch.distributions.kl.kl_divergence(
+        Categorical(logits=new_logits), 
+        Categorical(logits=ref_logits)
+    )
     return kl_div
 
-
-# Calculate KL divergence between two policies
-def train_maze_grpo(maze_env, num_episodes=5000, group_size=64):
+# Train the agent using GRPO
+def train_maze_grpo(maze_env, num_episodes=5000, group_size=64, grpo_iterations=3):
     """
     Train an agent using Group Relative Policy Optimization (GRPO)
-    with proper episode completion handling and improved trajectory collection
+    with proper episode completion handling and improved trajectory collection.
     
     Args:
-        maze_env: Maze environment instance
-        num_episodes: Maximum number of episodes to train
-        group_size: Number of trajectories to collect before updating policy
+        maze_env: Maze environment instance.
+        num_episodes: Maximum number of episodes to train.
+        group_size: Number of trajectories to collect before updating policy.
+        grpo_iterations: Number of GRPO iterations (μ) per trajectory update.
     """
     # Initialize Pygame for visualization
     pygame.init()
@@ -157,11 +152,11 @@ def train_maze_grpo(maze_env, num_episodes=5000, group_size=64):
     # Initialize GRPO components
     obs_dim = 4  # State dimensions: (x, y, target_x, target_y)
     act_dim = 4  # Action space: (up, down, left, right)
-
+    
     # Set up device (GPU/MPS if available, else CPU)
     device = ("mps" if torch.backends.mps.is_available() else
-             "cuda" if torch.cuda.is_available() else
-             "cpu")
+              "cuda" if torch.cuda.is_available() else
+              "cpu")
     print(f"Using device: {device}")
     
     # Initialize neural networks
@@ -328,7 +323,7 @@ def train_maze_grpo(maze_env, num_episodes=5000, group_size=64):
                 
             # Only proceed with updates if we have collected enough trajectories
             if valid_trajectories > 0:
-                # Update reward network with experiences
+                # Update reward network with experiences (using MSE loss here)
                 if len(experience_buffer) > 1000:  # Minimum size before training
                     states_batch, actions_batch, rewards_batch = experience_buffer.sample(256)
                     predicted_rewards = reward_network(states_batch, actions_batch)
@@ -341,34 +336,41 @@ def train_maze_grpo(maze_env, num_episodes=5000, group_size=64):
                 # Calculate group-relative advantages
                 relative_advantages = group_buffer.calculate_relative_advantage(group_total_rewards)
                 
-                # Policy update loop
+                # Policy update loop with GRPO iterations
                 for trajectory_idx in range(valid_trajectories):
                     # Convert trajectory data to tensors
-                    states = torch.FloatTensor(group_states[trajectory_idx]).to(device)
-                    actions = torch.LongTensor(group_actions[trajectory_idx]).to(device)
-                    old_log_probs = torch.FloatTensor(group_log_probs[trajectory_idx]).to(device)
-                    advantage = torch.FloatTensor([relative_advantages[trajectory_idx]] * len(states)).to(device)
+                    states_tensor = torch.FloatTensor(group_states[trajectory_idx]).to(device)
+                    actions_tensor = torch.LongTensor(group_actions[trajectory_idx]).to(device)
+                    old_log_probs_tensor = torch.FloatTensor(group_log_probs[trajectory_idx]).to(device)
+                    advantage_tensor = torch.FloatTensor([relative_advantages[trajectory_idx]] * len(states_tensor)).to(device)
                     
-                    # Calculate policy loss
-                    action_logits = policy(states)
-                    dist = Categorical(logits=action_logits)
-                    new_log_probs = dist.log_prob(actions)
-                    
-                    # Calculate PPO ratios and surrogate loss
-                    ratio = (new_log_probs - old_log_probs).exp()
-                    surr1 = ratio * advantage
-                    surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantage
-                    policy_loss = -torch.min(surr1, surr2).mean()
-                    
-                    # Calculate KL divergence loss
-                    kl_loss = beta * calculate_kl_divergence(policy, reference_policy, states).mean()
-                    
-                    # Compute total loss and update policy
-                    total_loss = policy_loss + kl_loss
-                    optimizer.zero_grad()
-                    total_loss.backward()
-                    optimizer.step()
-                
+                    # Perform multiple GRPO iterations for this trajectory
+                    for _ in range(grpo_iterations):
+                        action_logits = policy(states_tensor)
+                        dist = Categorical(logits=action_logits)
+                        new_log_probs = dist.log_prob(actions_tensor)
+                        
+                        # Compute the ratio and surrogate loss
+                        ratio = torch.exp(new_log_probs - old_log_probs_tensor)
+                        surr1 = ratio * advantage_tensor
+                        surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantage_tensor
+                        policy_loss = -torch.min(surr1, surr2).mean()
+                        
+                        # Compute KL divergence loss
+                        kl_loss = beta * calculate_kl_divergence(policy, reference_policy, states_tensor).mean()
+                        
+                        # Total GRPO loss (to be minimized)
+                        total_loss = policy_loss + kl_loss
+                        
+                        optimizer.zero_grad()
+                        total_loss.backward()
+                        optimizer.step()
+                        
+                        # Optional: Adaptive beta update based on KL divergence could be inserted here
+                        # For example:
+                        # if kl_loss.item() > 0.02: beta *= 1.1
+                        # elif kl_loss.item() < 0.005: beta /= 1.1
+                        
                 # Update group buffer and track rewards
                 avg_reward = np.mean(group_total_rewards)
                 episode_rewards.append(avg_reward)
@@ -438,7 +440,7 @@ if __name__ == '__main__':
     maze_env = Maze(level=0)  # Start with smallest maze
 
     # Train the agent
-    policy = train_maze_grpo(maze_env, num_episodes=5000)
+    policy, reward_network = train_maze_grpo(maze_env, num_episodes=5000)
 
     # Save the trained policy
     torch.save(policy.state_dict(), "maze_policy.pt")
