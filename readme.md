@@ -60,7 +60,7 @@ tensorboard
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/grpo-maze-solver
+   git clone https://github.com/jeffasante/grpo-maze-solver
    cd grpo-maze-solver
    ```
 
