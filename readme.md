@@ -24,7 +24,7 @@ This project demonstrates how an AI agent can learn to solve mazes through trial
    The policy is updated over multiple GRPO iterations per trajectory update. The update uses:
    - A surrogate loss similar to PPO with clipping.
    - A KL divergence penalty against a reference policy to maintain stability.
-   - Configurable hyperparameters such as the clipping parameter (\( \epsilon \)), KL coefficient (\( \beta \)), and the number of GRPO iterations (\( \mu \)).
+   - Configurable hyperparameters such as the clipping parameter ($\epsilon$), KL coefficient ($\beta$), and the number of GRPO iterations ($\mu$).
 
 5. **Reward Model Update:**  
    The reward model is continuously updated via a replay mechanism using the experiences stored in an experience buffer. An MSE loss is used (which can be replaced with a contrastive loss) to refine reward predictions over time.
@@ -41,7 +41,7 @@ This project demonstrates how an AI agent can learn to solve mazes through trial
   The reward model is updated using a replay buffer to ensure robust reward estimation.
 
 - **Configurable Hyperparameters:**  
-  Easily adjust key parameters such as the clipping parameter (\( \epsilon \)), KL coefficient (\( \beta \)), and GRPO iteration count (\( \mu \)).
+  Easily adjust key parameters such as the clipping parameter ($\epsilon$), KL coefficient ($\beta$), and GRPO iteration count ($\mu$).
 
 - **Performance Monitoring:**  
   Training progress is logged via TensorBoard, showing metrics such as average reward, best reward, success rate, and steps per episode.
